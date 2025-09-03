@@ -1,5 +1,5 @@
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from binance.client import Client
 import requests
@@ -16,6 +16,13 @@ BOT_TOKEN = "8141637379:AAEaCbFuH0PXtb8WHc4N06F1vM6h5XsJtw8"  # ЗАМЕНИТЕ
 
 # Создаем клиент Binance (можно без API ключей)
 client = Client()
+
+# Создаем reply-клавиатуру с командами
+reply_keyboard = [
+    [KeyboardButton("/menu"), KeyboardButton("/price")],
+    [KeyboardButton("/convert")]
+]
+reply_markup_menu = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
 
 async def get_p2p_price_binance():
     """
@@ -146,12 +153,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отправляет приветственное сообщение с кнопками"""
     user = update.effective_user
     
-    # Создаем клавиатуру с кнопками
-    keyboard = [
+    # Создаем inline-клавиатуру с кнопками
+    inline_keyboard = [
         [InlineKeyboardButton("💎 Узнать курс TON", callback_data='get_price')],
         [InlineKeyboardButton("🧮 Посчитать", switch_inline_query_current_chat="/convert ")]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    inline_markup = InlineKeyboardMarkup(inline_keyboard)
     
     # Красивое приветственное сообщение
     welcome_text = (
@@ -161,11 +168,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🚀 <b>Выберите действие:</b>\n"
         "• <b>Узнать курс</b> - текущая цена TON\n"
         "• <b>Посчитать</b> - конвертация в рубли\n\n"
-        "📊 <i>Данные обновляются в реальном времени</i>"
+        "📊 <i>Данные обновляются в реальном времени</i>\n\n"
+        "💡 <i>Используйте кнопки ниже для быстрого доступа к командам</i>"
     )
     
-    # ИСПРАВЛЕННАЯ СТРОКА: используем reply_text с parse_mode вместо reply_html
-    await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='HTML')
+    await update.message.reply_text(welcome_text, reply_markup=inline_markup, parse_mode='HTML')
+    # Отправляем reply-клавиатуру с командами
+    await update.message.reply_text(
+        "⌨️ <b>Быстрые команды:</b>",
+        reply_markup=reply_markup_menu,
+        parse_mode='HTML'
+    )
+
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает информацию о боте и командах"""
+    menu_text = (
+        "📋 <b>Меню TON Price Bot</b>\n\n"
+        "💎 <b>О боте:</b>\n"
+        "Я анализирую рынок P2P-торговли на крупнейших биржах \n"
+        "и показываю реальную стоимость TON в рублях.\n\n"
+        "🚀 <b>Доступные команды:</b>\n"
+        "• <b>/start</b> - начать работу с ботом\n"
+        "• <b>/menu</b> - показать это меню\n"
+        "• <b>/price</b> - текущий курс TON\n"
+        "• <b>/convert</b> - конвертировать TON в рубли\n\n"
+        "💡 <b>Примеры:</b>\n"
+        "<code>/convert 5.5</code> - посчитать стоимость 5.5 TON\n\n"
+        "📊 <i>Данные обновляются в реальном времени</i>"
+    )
+    await update.message.reply_text(menu_text, parse_mode='HTML')
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает нажатия на кнопки"""
@@ -205,18 +236,22 @@ async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_chat_action(action="typing")
     
     if not context.args:
-        await update.message.reply_text(
-            "Пожалуйста, укажите количество TON. Например: /convert 5.5", 
-            parse_mode=None
+        # Показываем подсказку как использовать команду
+        help_text = (
+            "🧮 <b>Конвертация TON в рубли</b>\n\n"
+            "💡 <i>Введите количество TON после команды:</i>\n"
+            "<code>/convert 5.5</code>\n\n"
+            "📝 <i>Или просто напишите число после нажатия кнопки \"Посчитать\"</i>"
         )
+        await update.message.reply_text(help_text, parse_mode='HTML')
         return
 
     try:
         amount = float(context.args[0])
     except ValueError:
         await update.message.reply_text(
-            "Пожалуйста, укажите корректное число. Например: /convert 5.5", 
-            parse_mode=None
+            "❌ Пожалуйста, укажите корректное число. Например: <code>/convert 5.5</code>", 
+            parse_mode='HTML'
         )
         return
 
@@ -235,7 +270,7 @@ async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(message_text, parse_mode='HTML')
     else:
         error_text = "😕 Не удалось получить данные для конвертации. Попробуйте позже."
-        await update.message.reply_text(error_text, parse_mode=None)
+        await update.message.reply_text(error_text)
 
 def main():
     """Запускает бота."""
@@ -243,6 +278,7 @@ def main():
     
     # Добавляем обработчики
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("menu", menu))
     application.add_handler(CommandHandler("price", price))
     application.add_handler(CommandHandler("convert", convert))
     application.add_handler(CallbackQueryHandler(button_handler))
