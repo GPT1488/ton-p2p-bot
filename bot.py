@@ -1,9 +1,8 @@
 import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from binance.client import Client
 import requests
-import json
 
 # Настройки логирования чтобы видеть ошибки
 logging.basicConfig(
@@ -144,35 +143,62 @@ async def get_usdt_rub_price():
     return None, "No data"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет сообщение при получении команды /start"""
+    """Отправляет приветственное сообщение с кнопками"""
     user = update.effective_user
-    await update.message.reply_html(
-        rf"Привет {user.mention_html()}! 🤖\n\n"
-        r"Я бот для отслеживания цены TON через P2P рынок.\n"
-        r"Доступные команды:\n"
-        r"• /price - текущая цена TON в рублях\n"
-        r"• /convert <amount> - конвертация TON в рубли\n"
-        r"Например: /convert 5.5"
+    
+    # Создаем клавиатуру с кнопками
+    keyboard = [
+        [InlineKeyboardButton("💎 Узнать курс TON", callback_data='get_price')],
+        [InlineKeyboardButton("🧮 Посчитать", switch_inline_query_current_chat="/convert ")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Красивое приветственное сообщение
+    welcome_text = (
+        f"👋 <b>Добро пожаловать, {user.first_name}!</b>\n\n"
+        "💎 <b>TON Price Bot</b> поможет отслеживать актуальный курс TON\n"
+        "на основе реальных P2P-сделок в рублях.\n\n"
+        "🚀 <b>Выберите действие:</b>\n"
+        "• <b>Узнать курс</b> - текущая цена TON\n"
+        "• <b>Посчитать</b> - конвертация в рубли\n\n"
+        "📊 <i>Данные обновляются в реальном времени</i>"
     )
+    
+    # ИСПРАВЛЕННАЯ СТРОКА: используем reply_text с parse_mode вместо reply_html
+    await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='HTML')
 
-async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет текущую цену TON в RUB"""
-    await update.message.reply_chat_action(action="typing")
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает нажатия на кнопки"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == 'get_price':
+        await send_price_message(query.message)
+
+async def send_price_message(message):
+    """Отправляет сообщение с текущей ценой"""
+    await message.reply_chat_action(action="typing")
     
     usdt_rub_price, source = await get_usdt_rub_price()
     ton_usdt_price = await get_ton_price()
 
     if usdt_rub_price and ton_usdt_price:
         ton_rub_price = ton_usdt_price * usdt_rub_price
-        message = (f"<b>💎 TON / RUB</b>\n\n"
-                   f"• <b>1 TON</b> ≈ <b>{ton_rub_price:,.2f} ₽</b>\n"
-                   f"• 1 USDT = {usdt_rub_price} ₽ ({source})\n"
-                   f"• 1 TON = {ton_usdt_price:,.4f} $\n\n"
-                   f"<i>Обновлено: {source}</i>")
+        message_text = (
+            f"💎 <b>Актуальный курс TON</b>\n\n"
+            f"• <b>1 TON</b> = <b>{ton_rub_price:,.2f} ₽</b>\n"
+            f"• 1 USDT = {usdt_rub_price} ₽ ({source})\n"
+            f"• 1 TON = {ton_usdt_price:,.4f} $\n\n"
+            f"📊 <i>Обновлено: {source}</i>"
+        )
     else:
-        message = "😕 Не удалось получить данные от всех источников. Попробуйте позже."
+        message_text = "😕 Не удалось получить данные. Попробуйте позже."
+    
+    await message.reply_text(message_text, parse_mode='HTML')
 
-    await update.message.reply_text(message, parse_mode='HTML')
+async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /price"""
+    await send_price_message(update.message)
 
 async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Конвертирует указанное количество TON в рубли"""
@@ -180,8 +206,8 @@ async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not context.args:
         await update.message.reply_text(
-            "Пожалуйста, укажите количество TON. Например: `/convert 5.5`", 
-            parse_mode='Markdown'
+            "Пожалуйста, укажите количество TON. Например: /convert 5.5", 
+            parse_mode=None
         )
         return
 
@@ -189,8 +215,8 @@ async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount = float(context.args[0])
     except ValueError:
         await update.message.reply_text(
-            "Пожалуйста, укажите корректное число. Например: `/convert 5.5`", 
-            parse_mode='Markdown'
+            "Пожалуйста, укажите корректное число. Например: /convert 5.5", 
+            parse_mode=None
         )
         return
 
@@ -199,24 +225,27 @@ async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if usdt_rub_price and ton_usdt_price:
         result = (amount * ton_usdt_price) * usdt_rub_price
-        message = (f"<b>🧮 Конвертация</b>\n\n"
-                   f"• <b>{amount} TON</b> ≈ <b>{result:,.2f} ₽</b>\n"
-                   f"• Источник: {source}\n"
-                   f"• Курс: 1 TON = {ton_usdt_price:,.4f} $\n"
-                   f"• Курс: 1 USDT = {usdt_rub_price} ₽")
+        message_text = (
+            f"🧮 <b>Конвертация TON</b>\n\n"
+            f"• <b>{amount} TON</b> = <b>{result:,.2f} ₽</b>\n"
+            f"• Курс: 1 TON = {ton_usdt_price:,.4f} $\n"
+            f"• Курс: 1 USDT = {usdt_rub_price} ₽\n"
+            f"• Источник: {source}"
+        )
+        await update.message.reply_text(message_text, parse_mode='HTML')
     else:
-        message = "😕 Не удалось получить данные для конвертации. Попробуйте позже."
-
-    await update.message.reply_text(message, parse_mode='HTML')
+        error_text = "😕 Не удалось получить данные для конвертации. Попробуйте позже."
+        await update.message.reply_text(error_text, parse_mode=None)
 
 def main():
     """Запускает бота."""
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Добавляем обработчики команд
+    # Добавляем обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("price", price))
     application.add_handler(CommandHandler("convert", convert))
+    application.add_handler(CallbackQueryHandler(button_handler))
     
     print("Бот запущен...")
     application.run_polling()
