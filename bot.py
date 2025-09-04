@@ -1,41 +1,52 @@
+import os
 import logging
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.error import NetworkError, RetryAfter
 from binance.client import Client
 import requests
 
-# Настройки логирования чтобы видеть ошибки
+# ========== НАСТРОЙКА ЛОГГИРОВАНИЯ ==========
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Константы
-BOT_TOKEN = "8141637379:AAEaCbFuH0PXtb8WHc4N06F1vM6h5XsJtw8"  # ЗАМЕНИТЕ НА СВОЙ ТОКЕН!
+# ========== КОНСТАНТЫ ==========
+BOT_TOKEN = os.environ.get('BOT_TOKEN')  # Токен из переменных окружения Koyeb
 
-# Создаем клиент Binance (можно без API ключей)
+# ========== ИНИЦИАЛИЗАЦИЯ КЛИЕНТОВ ==========
 client = Client()
 
-# Создаем reply-клавиатуру с командами
-reply_keyboard = [
-    [KeyboardButton("/menu"), KeyboardButton("/price")],
-    [KeyboardButton("/convert")]
-]
-reply_markup_menu = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
+# ========== КЛАВИАТУРЫ ==========
+def get_main_reply_keyboard():
+    """Главная reply-клавиатура"""
+    keyboard = [
+        [KeyboardButton("💰 Узнать курс"), KeyboardButton("🧮 Конвертировать")],
+        [KeyboardButton("📋 Меню"), KeyboardButton("🆘 Помощь")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
+def get_main_inline_keyboard():
+    """Главная inline-клавиатура"""
+    keyboard = [
+        [InlineKeyboardButton("💰 Узнать курс TON", callback_data='get_price')],
+        [InlineKeyboardButton("🧮 Конвертировать", switch_inline_query_current_chat="/convert ")],
+        [InlineKeyboardButton("📊 Источники данных", callback_data='sources')]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+# ========== ФУНКЦИИ ДЛЯ ПОЛУЧЕНИЯ ЦЕН ==========
 async def get_p2p_price_binance():
-    """
-    Основная функция: получаем цену USDT/RUB с P2P Binance.
-    Ищет по всем доступным методам оплаты.
-    """
+    """Получаем цену USDT/RUB с P2P Binance"""
     try:
-        # Широкие параметры поиска
         data = {
             "proMerchantAds": False,
             "page": 1,
             "rows": 20,
-            "payTypes": [],  # Ищем по всем методам оплаты
+            "payTypes": [],
             "countries": [],
             "publisherType": None,
             "fiat": "RUB",
@@ -60,11 +71,9 @@ async def get_p2p_price_binance():
         ads = result['data']
         prices = []
 
-        # Собираем цены из доступных объявлений
         for ad in ads:
             try:
                 adv_info = ad['adv']
-                # Проверяем что объявление активно и есть доступный объем
                 if (float(adv_info['surplusAmount']) > 0 and 
                     adv_info['tradeMethods'] and
                     adv_info['price']):
@@ -74,7 +83,6 @@ async def get_p2p_price_binance():
                 continue
 
         if prices:
-            # Берем среднюю цену из топ-5 предложений
             top_prices = sorted(prices)[:5]
             average_price = sum(top_prices) / len(top_prices)
             logger.info(f"Binance P2P: found {len(prices)} offers, average price: {average_price}")
@@ -88,9 +96,7 @@ async def get_p2p_price_binance():
         return None
 
 async def get_spot_price_binance():
-    """
-    Резервная функция: получаем цену USDT/RUB с спотового рынка Binance.
-    """
+    """Получаем цену USDT/RUB с спотового рынка Binance"""
     try:
         ticker = client.get_symbol_ticker(symbol="USDTRUB")
         usdt_rub_price = float(ticker['price'])
@@ -101,9 +107,7 @@ async def get_spot_price_binance():
         return None
 
 async def get_price_coingecko():
-    """
-    Аварийная функция: получаем цену USDT/RUB с CoinGecko.
-    """
+    """Получаем цену USDT/RUB с CoinGecko"""
     try:
         response = requests.get(
             'https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=rub',
@@ -118,9 +122,7 @@ async def get_price_coingecko():
         return None
 
 async def get_ton_price():
-    """
-    Функция для получения текущей цены TON к USDT.
-    """
+    """Получаем текущую цену TON к USDT"""
     try:
         ticker = client.get_symbol_ticker(symbol="TONUSDT")
         ton_price = float(ticker['price'])
@@ -131,57 +133,46 @@ async def get_ton_price():
         return None
 
 async def get_usdt_rub_price():
-    """
-    Главная функция получения цены USDT/RUB.
-    Пробует все методы по очереди до первого успешного.
-    """
-    price = await get_p2p_price_binance()
-    if price is not None:
-        return price, "P2P Binance"
+    """Главная функция получения цены USDT/RUB"""
+    price_sources = [
+        (get_p2p_price_binance, "P2P Binance"),
+        (get_spot_price_binance, "Spot Binance"),
+        (get_price_coingecko, "CoinGecko")
+    ]
     
-    price = await get_spot_price_binance()
-    if price is not None:
-        return price, "Spot Binance"
-    
-    price = await get_price_coingecko()
-    if price is not None:
-        return price, "CoinGecko"
+    for price_func, source in price_sources:
+        price = await price_func()
+        if price is not None:
+            return price, source
     
     return None, "No data"
 
+# ========== ОБРАБОТЧИКИ КОМАНД ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет приветственное сообщение с кнопками"""
+    """Обработчик команды /start"""
     user = update.effective_user
     
-    # Создаем inline-клавиатуру с кнопками
-    inline_keyboard = [
-        [InlineKeyboardButton("💎 Узнать курс TON", callback_data='get_price')],
-        [InlineKeyboardButton("🧮 Посчитать", switch_inline_query_current_chat="/convert ")]
-    ]
-    inline_markup = InlineKeyboardMarkup(inline_keyboard)
-    
-    # Красивое приветственное сообщение
     welcome_text = (
         f"👋 <b>Добро пожаловать, {user.first_name}!</b>\n\n"
         "💎 <b>TON Price Bot</b> поможет отслеживать актуальный курс TON\n"
         "на основе реальных P2P-сделок в рублях.\n\n"
         "🚀 <b>Выберите действие:</b>\n"
         "• <b>Узнать курс</b> - текущая цена TON\n"
-        "• <b>Посчитать</b> - конвертация в рубли\n\n"
+        "• <b>Конвертировать</b> - перевести TON в рубли\n"
+        "• <b>Меню</b> - информация о командах\n\n"
         "📊 <i>Данные обновляются в реальном времени</i>\n\n"
-        "💡 <i>Используйте кнопки ниже для быстрого доступа к командам</i>"
+        "💡 <i>Используйте кнопки ниже для быстрого доступа</i>"
     )
     
-    await update.message.reply_text(welcome_text, reply_markup=inline_markup, parse_mode='HTML')
-    # Отправляем reply-клавиатуру с командами
-    await update.message.reply_text(
-        "⌨️ <b>Быстрые команды:</b>",
-        reply_markup=reply_markup_menu,
-        parse_mode='HTML'
-    )
+    await update.message.reply_text(welcome_text, 
+                                  reply_markup=get_main_inline_keyboard(), 
+                                  parse_mode='HTML')
+    await update.message.reply_text("⌨️ <b>Быстрые команды:</b>", 
+                                  reply_markup=get_main_reply_keyboard(), 
+                                  parse_mode='HTML')
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает информацию о боте и командах"""
+    """Обработчик команды /menu"""
     menu_text = (
         "📋 <b>Меню TON Price Bot</b>\n\n"
         "💎 <b>О боте:</b>\n"
@@ -198,13 +189,41 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(menu_text, parse_mode='HTML')
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /help"""
+    help_text = (
+        "🆘 <b>Помощь по TON Price Bot</b>\n\n"
+        "💎 <b>Как использовать:</b>\n"
+        "• Нажмите <b>💰 Узнать курс</b> для получения текущей цены\n"
+        "• Нажмите <b>🧮 Конвертировать</b> для перевода TON в рубли\n"
+        "• Или используйте команды:\n"
+        "  <code>/price</code> - курс TON\n"
+        "  <code>/convert 10</code> - конвертация 10 TON\n\n"
+        "🔧 <b>Источники данных:</b>\n"
+        "• P2P Binance (основной)\n"
+        "• Spot Binance (резервный)\n"
+        "• CoinGecko (аварийный)\n\n"
+        "📞 <b>Если возникли проблемы:</b>\n"
+        "Перезапустите бота командой /start"
+    )
+    await update.message.reply_text(help_text, parse_mode='HTML')
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает нажатия на кнопки"""
+    """Обработчик нажатий на inline-кнопки"""
     query = update.callback_query
     await query.answer()
     
     if query.data == 'get_price':
         await send_price_message(query.message)
+    elif query.data == 'sources':
+        sources_text = (
+            "📊 <b>Источники данных:</b>\n\n"
+            "• <b>P2P Binance</b> - основные данные с P2P-площадки\n"
+            "• <b>Spot Binance</b> - биржевые данные (резерв)\n"
+            "• <b>CoinGecko</b> - агрегатор цен (аварийный источник)\n\n"
+            "💡 Бот автоматически выбирает самый надежный источник"
+        )
+        await query.message.reply_text(sources_text, parse_mode='HTML')
 
 async def send_price_message(message):
     """Отправляет сообщение с текущей ценой"""
@@ -220,10 +239,15 @@ async def send_price_message(message):
             f"• <b>1 TON</b> = <b>{ton_rub_price:,.2f} ₽</b>\n"
             f"• 1 USDT = {usdt_rub_price} ₽ ({source})\n"
             f"• 1 TON = {ton_usdt_price:,.4f} $\n\n"
-            f"📊 <i>Обновлено: {source}</i>"
+            f"📊 <i>Обновлено: {source}</i>\n"
+            f"🔄 <i>Используйте /convert для расчетов</i>"
         )
     else:
-        message_text = "😕 Не удалось получить данные. Попробуйте позже."
+        message_text = (
+            "😕 <b>Не удалось получить данные</b>\n\n"
+            "Попробуйте снова через несколько минут.\n"
+            "Если проблема persists, используйте /help"
+        )
     
     await message.reply_text(message_text, parse_mode='HTML')
 
@@ -232,25 +256,27 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_price_message(update.message)
 
 async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Конвертирует указанное количество TON в рубли"""
+    """Обработчик команды /convert"""
     await update.message.reply_chat_action(action="typing")
     
     if not context.args:
-        # Показываем подсказку как использовать команду
         help_text = (
             "🧮 <b>Конвертация TON в рубли</b>\n\n"
             "💡 <i>Введите количество TON после команды:</i>\n"
             "<code>/convert 5.5</code>\n\n"
-            "📝 <i>Или просто напишите число после нажатия кнопки \"Посчитать\"</i>"
+            "📝 <i>Или просто напишите число после нажатия кнопки \"Конвертировать\"</i>"
         )
         await update.message.reply_text(help_text, parse_mode='HTML')
         return
 
     try:
         amount = float(context.args[0])
+        if amount <= 0:
+            raise ValueError
     except ValueError:
         await update.message.reply_text(
-            "❌ Пожалуйста, укажите корректное число. Например: <code>/convert 5.5</code>", 
+            "❌ <b>Ошибка!</b> Пожалуйста, укажите корректное положительное число.\n\n"
+            "<i>Пример:</i> <code>/convert 5.5</code>", 
             parse_mode='HTML'
         )
         return
@@ -265,26 +291,85 @@ async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• <b>{amount} TON</b> = <b>{result:,.2f} ₽</b>\n"
             f"• Курс: 1 TON = {ton_usdt_price:,.4f} $\n"
             f"• Курс: 1 USDT = {usdt_rub_price} ₽\n"
-            f"• Источник: {source}"
+            f"• Источник: {source}\n\n"
+            f"💡 <i>Для актуального курса используйте /price</i>"
         )
         await update.message.reply_text(message_text, parse_mode='HTML')
     else:
-        error_text = "😕 Не удалось получить данные для конвертации. Попробуйте позже."
-        await update.message.reply_text(error_text)
+        error_text = (
+            "😕 <b>Не удалось получить данные для конвертации</b>\n\n"
+            "Попробуйте снова через несколько минут.\n"
+            "Используйте /price для проверки доступности данных"
+        )
+        await update.message.reply_text(error_text, parse_mode='HTML')
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик текстовых сообщений (для reply-кнопок)"""
+    text = update.message.text
+    
+    if text == "💰 Узнать курс":
+        await send_price_message(update.message)
+    elif text == "🧮 Конвертировать":
+        await update.message.reply_text(
+            "💡 Введите количество TON для конвертации:\n\n"
+            "<i>Пример:</i> <code>5.5</code> или <code>/convert 5.5</code>",
+            parse_mode='HTML'
+        )
+    elif text == "📋 Меню":
+        await menu(update, context)
+    elif text == "🆘 Помощь":
+        await help_command(update, context)
+
+# ========== ОБРАБОТЧИК ОШИБОК ==========
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик ошибок"""
+    logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
+    
+    if isinstance(context.error, (NetworkError, RetryAfter)):
+        # Это временные ошибки сети, просто логируем
+        return
+        
+    try:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="😕 <b>Произошла ошибка</b>\n\nПопробуйте снова через несколько секунд.",
+            parse_mode='HTML'
+        )
+    except:
+        pass
+
+# ========== ЗАПУСК БОТА ==========
 def main():
-    """Запускает бота."""
+    """Запускает бота с обработкой ошибок"""
+    if not BOT_TOKEN:
+        logger.error("Токен бота не найден! Убедитесь, что переменная BOT_TOKEN установлена.")
+        return
+
+    # Создаем приложение
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Добавляем обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", menu))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("price", price))
     application.add_handler(CommandHandler("convert", convert))
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    print("Бот запущен...")
-    application.run_polling()
+    # Обработчик текстовых сообщений для reply-кнопок
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Обработчик ошибок
+    application.add_error_handler(error_handler)
+    
+    logger.info("Бот запущен...")
+    
+    # Запускаем бота с бесконечным циклом
+    try:
+        application.run_polling()
+    except Exception as e:
+        logger.error(f"Critical error: {e}")
+        # Здесь можно добавить логику для перезапуска
 
 if __name__ == '__main__':
     main()
